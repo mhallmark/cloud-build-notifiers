@@ -87,10 +87,11 @@ func TestGetMailConfig(t *testing.T) {
 					Filter: `event.status == "SUCCESS"`,
 					Delivery: map[string]interface{}{
 						"server":     "smtp.example.com",
-						"port":       "4040",
+						"port":       4040,
 						"password":   map[interface{}]interface{}{"secretRef": "my-smtp-password"},
 						"sender":     "me@example.com",
 						"from":       "another_me@example.com",
+						"localName":  "test.name",
 						"recipients": []interface{}{"my-cto@example.com", "my-friend@example.com"},
 					},
 				},
@@ -98,10 +99,11 @@ func TestGetMailConfig(t *testing.T) {
 			},
 			wantConfig: mailConfig{
 				server:     "smtp.example.com",
-				port:       "4040",
+				port:       4040,
 				password:   password,
 				sender:     "me@example.com",
 				from:       "another_me@example.com",
+				localName:  "test.name",
 				recipients: []string{"my-cto@example.com", "my-friend@example.com"},
 			},
 		}, {
@@ -150,9 +152,10 @@ spec:
     filter: event.buildTriggerStatus == “STATUS_FAILED”
     delivery:
       server: smtp.example.com
-      port: '587'
+      port: 587
       sender: my-notifier@example.com
       from: my-notifier-from@example.com
+      localName: test.name
       password:
         secretRef: smtp-password
       recipients:
@@ -165,9 +168,10 @@ spec:
 
 	wantMailConfig := mailConfig{
 		server:     "smtp.example.com",
-		port:       "587",
+		port:       587,
 		password:   password,
 		sender:     "my-notifier@example.com",
+		localName:  "test.name",
 		from:       "my-notifier-from@example.com",
 		recipients: []string{"some-eng@example.com", "me@example.com"},
 	}

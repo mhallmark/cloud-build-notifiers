@@ -21,21 +21,32 @@ import (
 	"html/template"
 	"mime/quotedprintable"
 	"net/smtp"
+	"os"
 	"strings"
 
+	"github.com/enfabrica/enkit/lib/logger"
+	"github.com/sirupsen/logrus"
+
 	"github.com/GoogleCloudPlatform/cloud-build-notifiers/lib/notifiers"
-	log "github.com/golang/glog"
 	"github.com/golang/protobuf/proto"
 	cbpb "google.golang.org/genproto/googleapis/devtools/cloudbuild/v1"
+
+	"gopkg.in/gomail.v2"
 )
 
 const (
 	contentType = "text/html"
 )
 
+var log = logger.DefaultLogger{
+	Printer: logrus.Printf,
+}
+
 func main() {
+	log.Infof("starting email notifier")
 	if err := notifiers.Main(new(smtpNotifier)); err != nil {
-		log.Fatalf("fatal error: %v", err)
+		log.Errorf("fatal error: %v", err)
+		os.Exit(1)
 	}
 }
 
@@ -48,8 +59,9 @@ type smtpNotifier struct {
 }
 
 type mailConfig struct {
-	server, port, sender, from, password string
-	recipients                           []string
+	server, sender, from, password, localName string
+	port                                      int
+	recipients                                []string
 }
 
 func (s *smtpNotifier) SetUp(ctx context.Context, cfg *notifiers.Config, cfgTemplate string, sg notifiers.SecretGetter, br notifiers.BindingResolver) error {
@@ -80,25 +92,31 @@ func getMailConfig(ctx context.Context, sg notifiers.SecretGetter, spec *notifie
 	if !ok {
 		return mailConfig{}, fmt.Errorf("expected delivery config %v to have string field `server`", delivery)
 	}
-	port, ok := delivery["port"].(string)
+	log.Infof("Server: %s", server)
+	port, ok := delivery["port"].(int)
 	if !ok {
 		return mailConfig{}, fmt.Errorf("expected delivery config %v to have string field `port`", delivery)
 	}
+	log.Infof("Port: %d", port)
 	sender, ok := delivery["sender"].(string)
 	if !ok {
 		return mailConfig{}, fmt.Errorf("expected delivery config %v to have string field `sender`", delivery)
 	}
 
+	localName, ok := delivery["localName"].(string)
+	if !ok {
+		return mailConfig{}, fmt.Errorf("expected delivery config %v to have string field `localName`", delivery)
+	}
+	log.Infof("LocalName: %s", localName)
 	from, ok := delivery["from"].(string)
 	if !ok {
 		return mailConfig{}, fmt.Errorf("expected delivery config %v to have string field `from`", delivery)
 	}
-
+	log.Infof("From: %s", from)
 	ris, ok := delivery["recipients"].([]interface{})
 	if !ok {
 		return mailConfig{}, fmt.Errorf("expected delivery config %v to have repeated field `recipients`", delivery)
 	}
-
 	recipients := make([]string, 0, len(ris))
 	for _, ri := range ris {
 		r, ok := ri.(string)
@@ -107,7 +125,7 @@ func getMailConfig(ctx context.Context, sg notifiers.SecretGetter, spec *notifie
 		}
 		recipients = append(recipients, r)
 	}
-
+	log.Infof("Recipients: %s", strings.Join(recipients, ", "))
 	passwordRef, err := notifiers.GetSecretRef(delivery, "password")
 	if err != nil {
 		return mailConfig{}, fmt.Errorf("failed to get ref for secret field `password`: %w", err)
@@ -127,6 +145,7 @@ func getMailConfig(ctx context.Context, sg notifiers.SecretGetter, spec *notifie
 		server:     server,
 		port:       port,
 		sender:     sender,
+		localName:  localName,
 		from:       from,
 		password:   password,
 		recipients: recipients,
@@ -135,9 +154,10 @@ func getMailConfig(ctx context.Context, sg notifiers.SecretGetter, spec *notifie
 
 func (s *smtpNotifier) SendNotification(ctx context.Context, build *cbpb.Build) error {
 	if !s.filter.Apply(ctx, build) {
-		log.V(2).Infof("no mail for event:\n%s", proto.MarshalTextString(build))
+		log.Infof("no mail for event:\n%s", proto.MarshalTextString(build))
 		return nil
 	}
+
 	bindings, err := s.br.Resolve(ctx, nil, build)
 	if err != nil {
 		log.Errorf("failed to resolve bindings :%v", err)
@@ -151,61 +171,62 @@ func (s *smtpNotifier) SendNotification(ctx context.Context, build *cbpb.Build) 
 }
 
 func (s *smtpNotifier) sendSMTPNotification() error {
-	email, err := s.buildEmail()
+	msg, err := s.buildEmail()
 	if err != nil {
-		log.Warningf("failed to build email: %v", err)
+		log.Warnf("failed to build email: %v", err)
+		return fmt.Errorf("failed to build email: %w", err)
 	}
 
-	addr := fmt.Sprintf("%s:%s", s.mcfg.server, s.mcfg.port)
 	auth := smtp.PlainAuth("", s.mcfg.sender, s.mcfg.password, s.mcfg.server)
 
-	if err = smtp.SendMail(addr, auth, s.mcfg.from, s.mcfg.recipients, []byte(email)); err != nil {
+	d := gomail.NewDialer(s.mcfg.server, s.mcfg.port, s.mcfg.sender, s.mcfg.password)
+	d.LocalName = s.mcfg.localName
+	d.Auth = auth
+
+	if err = d.DialAndSend(msg); err != nil {
 		return fmt.Errorf("failed to send email: %w", err)
 	}
-	log.V(2).Infoln("email sent successfully")
+
+	log.Infof("email sent successfully")
 	return nil
 }
 
-func (s *smtpNotifier) buildEmail() (string, error) {
+func (s *smtpNotifier) buildEmail() (*gomail.Message, error) {
+	msg := gomail.NewMessage()
 	build := s.tmplView.Build
 	logURL, err := notifiers.AddUTMParams(s.tmplView.Build.LogUrl, notifiers.EmailMedium)
 	if err != nil {
-		return "", fmt.Errorf("failed to add UTM params: %w", err)
+		return nil, fmt.Errorf("failed to add UTM params: %w", err)
 	}
 	build.LogUrl = logURL
 
 	body := new(bytes.Buffer)
 	if err := s.tmpl.Execute(body, s.tmplView); err != nil {
-		return "", err
+		return nil, err
 	}
+
+	msg.SetBody(fmt.Sprintf(`%s; charset="utf-8"`, contentType), body.String())
 
 	subject := fmt.Sprintf("Cloud Build [%s]: %s", build.ProjectId, build.Id)
+	msg.SetHeader("Subject", subject)
 
-	header := make(map[string]string)
 	if s.mcfg.from != s.mcfg.sender {
-		header["Sender"] = s.mcfg.sender
+		msg.SetHeader("Sender", s.mcfg.sender)
 	}
-	header["From"] = s.mcfg.from
-	header["To"] = strings.Join(s.mcfg.recipients, ",")
-	header["Subject"] = subject
-	header["MIME-Version"] = "1.0"
-	header["Content-Type"] = fmt.Sprintf(`%s; charset="utf-8"`, contentType)
-	header["Content-Transfer-Encoding"] = "quoted-printable"
-	header["Content-Disposition"] = "inline"
 
-	var msg string
-	for key, value := range header {
-		msg += fmt.Sprintf("%s: %s\r\n", key, value)
-	}
+	msg.SetHeader("From", s.mcfg.from)
+	msg.SetHeader("To", s.mcfg.recipients...)
+	msg.SetHeader("MIME-Version", "1.0")
+	msg.SetHeader("Content-Type", fmt.Sprintf(`%s; charset="utf-8"`, contentType))
+	msg.SetHeader("Content-Transfer-Encoding", "quoted-printable")
+	msg.SetHeader("Content-Disposition", "inline")
 
 	encoded := new(bytes.Buffer)
 	finalMsg := quotedprintable.NewWriter(encoded)
 	finalMsg.Write(body.Bytes())
 	if err := finalMsg.Close(); err != nil {
-		return "", fmt.Errorf("failed to close MIME writer: %w", err)
+		return nil, fmt.Errorf("failed to close MIME writer: %w", err)
 	}
-
-	msg += "\r\n" + encoded.String()
 
 	return msg, nil
 }
