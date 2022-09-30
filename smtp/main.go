@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"html/template"
 	"mime/quotedprintable"
-	"net/smtp"
 	"os"
 	"strings"
 
@@ -177,11 +176,8 @@ func (s *smtpNotifier) sendSMTPNotification() error {
 		return fmt.Errorf("failed to build email: %w", err)
 	}
 
-	auth := smtp.PlainAuth("", s.mcfg.sender, s.mcfg.password, s.mcfg.server)
-
 	d := gomail.NewDialer(s.mcfg.server, s.mcfg.port, s.mcfg.sender, s.mcfg.password)
 	d.LocalName = s.mcfg.localName
-	d.Auth = auth
 	sc, err := d.Dial()
 	if err != nil {
 		return fmt.Errorf("failed to dial: %w", err)
