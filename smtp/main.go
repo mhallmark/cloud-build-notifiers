@@ -182,8 +182,13 @@ func (s *smtpNotifier) sendSMTPNotification() error {
 	d := gomail.NewDialer(s.mcfg.server, s.mcfg.port, s.mcfg.sender, s.mcfg.password)
 	d.LocalName = s.mcfg.localName
 	d.Auth = auth
+	sc, err := d.Dial()
+	if err != nil {
+		return fmt.Errorf("failed to dial: %w", err)
+	}
+	defer sc.Close()
 
-	if err = d.DialAndSend(msg); err != nil {
+	if err = gomail.Send(sc, msg); err != nil {
 		return fmt.Errorf("failed to send email: %w", err)
 	}
 
